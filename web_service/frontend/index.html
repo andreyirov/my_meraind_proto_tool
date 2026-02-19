@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Diagram Generator</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .app-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { text-align: center; color: #333; }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .type-selector {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #eee;
+            border-radius: 4px;
+        }
+        textarea.input-desc {
+            width: 100%;
+            height: 80px;
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        textarea.code-editor {
+            width: 100%;
+            height: 150px;
+            font-family: monospace;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        button.secondary { background-color: #6c757d; }
+        button.secondary:hover { background-color: #545b62; }
+        button.success { background-color: #28a745; }
+        button.success:hover { background-color: #218838; }
+        
+        .diagram-container {
+            border: 1px solid #ddd;
+            padding: 20px;
+            min-height: 400px;
+            background: white;
+            border-radius: 4px;
+            margin-top: 20px;
+            overflow: auto;
+            display: flex;
+            justify-content: center;
+        }
+        .error {
+            color: #dc3545;
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        .loading {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+        }
+        .editor-section {
+            margin-top: 20px;
+            border-top: 1px solid #eee;
+            padding-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app" class="app-container">
+        <h1>AI Diagram Generator</h1>
+        
+        <div class="type-selector">
+            <strong>Diagram Type:</strong>
+            <label>
+                <input type="radio" v-model="diagramType" value="sequence"> Sequence Diagram
+            </label>
+            <label>
+                <input type="radio" v-model="diagramType" value="flowchart"> Flowchart (Block)
+            </label>
+        </div>
+
+        <textarea 
+            class="input-desc"
+            v-model="description" 
+            placeholder="Describe your diagram or enter feedback to modify the current one..."
+            @keydown.ctrl.enter="generateDiagram"
+        ></textarea>
+        
+        <div class="controls">
+            <button @click="generateDiagram" :disabled="loading || !description">
+                {{ currentCode ? 'Update Diagram' : 'Generate Diagram' }}
+            </button>
+            <button class="secondary" @click="undo" :disabled="currentIndex <= 0">
+                &larr; Step Back (Undo)
+            </button>
+            <button class="secondary" @click="redo" :disabled="currentIndex >= history.length - 1">
+                Step Forward (Redo) &rarr;
+            </button>
+            <button class="secondary" @click="newDiagram">New Diagram</button>
+            <button class="secondary" @click="saveDiagramMMD" :disabled="!currentCode">Save .mmd</button>
+            <button class="success" @click="saveDiagramSVG" :disabled="!currentCode">Download SVG</button>
+        </div>
+
+        <div v-if="loading" class="loading">Processing request with AI...</div>
+        <div v-if="error" class="error">{{ error }}</div>
+
+        <div class="diagram-container" ref="diagramContainer">
+            <!-- Mermaid diagram will be rendered here -->
+        </div>
+        
+        <div v-if="currentCode" class="editor-section">
+            <details>
+                <summary><strong>Edit Mermaid Code Manually</strong></summary>
+                <p style="font-size: 0.9em; color: #666;">You can manually edit the code below. Click "Render Manual Changes" to update the diagram.</p>
+                <textarea class="code-editor" v-model="manualCode"></textarea>
+                <div style="margin-top: 10px;">
+                    <button @click="applyManualChanges">Render Manual Changes</button>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, watch, nextTick, onMounted } = Vue;
+
+        createApp({
+            setup() {
+                const diagramType = ref('sequence');
+                const description = ref('');
+                const history = ref([]);
+                const currentIndex = ref(-1);
+                const loading = ref(false);
+                const error = ref(null);
+                const diagramContainer = ref(null);
+                const manualCode = ref('');
+
+                const currentCode = computed(() => {
+                    if (currentIndex.value >= 0 && currentIndex.value < history.value.length) {
+                        return history.value[currentIndex.value];
+                    }
+                    return '';
+                });
+
+                // Sync manualCode with currentCode when history changes
+                watch(currentCode, (newVal) => {
+                    manualCode.value = newVal;
+                });
+
+                const renderDiagram = async (code) => {
+                    if (!diagramContainer.value) return;
+                    
+                    if (!code) {
+                        diagramContainer.value.innerHTML = '';
+                        return;
+                    }
+
+                    // Reset container content
+                    diagramContainer.value.innerHTML = `<pre class="mermaid">${code}</pre>`;
+                    
+                    try {
+                        await mermaid.run({
+                            nodes: diagramContainer.value.querySelectorAll('.mermaid')
+                        });
+                        error.value = null; // Clear error on success
+                    } catch (e) {
+                        console.error('Mermaid error:', e);
+                        error.value = 'Error rendering diagram. The syntax might be invalid.';
+                    }
+                };
+
+                const generateDiagram = async () => {
+                    if (!description.value) return;
+                    
+                    loading.value = true;
+                    error.value = null;
+                    
+                    try {
+                        const response = await fetch('/api/generate', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                diagram_type: diagramType.value,
+                                description: description.value,
+                                current_diagram: currentCode.value || null
+                            })
+                        });
+                        
+                        if (!response.ok) {
+                            const errData = await response.json();
+                            throw new Error(errData.detail || 'Failed to generate diagram');
+                        }
+                        
+                        const data = await response.json();
+                        
+                        // Add to history
+                        if (currentIndex.value < history.value.length - 1) {
+                            history.value = history.value.slice(0, currentIndex.value + 1);
+                        }
+                        
+                        history.value.push(data.code);
+                        currentIndex.value = history.value.length - 1;
+                        description.value = ''; 
+                        
+                    } catch (e) {
+                        error.value = e.message;
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+
+                const applyManualChanges = () => {
+                    if (manualCode.value !== currentCode.value) {
+                         // Add manual edit to history so undo works for manual edits too
+                        if (currentIndex.value < history.value.length - 1) {
+                            history.value = history.value.slice(0, currentIndex.value + 1);
+                        }
+                        history.value.push(manualCode.value);
+                        currentIndex.value = history.value.length - 1;
+                    } else {
+                        // Just re-render if user clicked button but didn't change anything (or to force re-render)
+                        renderDiagram(manualCode.value);
+                    }
+                };
+
+                const undo = () => {
+                    if (currentIndex.value > 0) currentIndex.value--;
+                };
+
+                const redo = () => {
+                    if (currentIndex.value < history.value.length - 1) currentIndex.value++;
+                };
+
+                const newDiagram = () => {
+                    if (confirm('Are you sure you want to start a new diagram? Unsaved changes will be lost.')) {
+                        history.value = [];
+                        currentIndex.value = -1;
+                        description.value = '';
+                        error.value = null;
+                        diagramContainer.value.innerHTML = '';
+                        manualCode.value = '';
+                    }
+                };
+
+                const saveDiagramMMD = () => {
+                    const blob = new Blob([currentCode.value], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `diagram-${new Date().toISOString()}.mmd`;
+                    a.click();
+                };
+
+                const saveDiagramSVG = () => {
+                    const svgElement = diagramContainer.value.querySelector('svg');
+                    if (!svgElement) {
+                        alert('No diagram to save!');
+                        return;
+                    }
+                    const svgData = new XMLSerializer().serializeToString(svgElement);
+                    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `diagram-${new Date().toISOString()}.svg`;
+                    a.click();
+                };
+
+                // Watch for code changes to re-render
+                watch(currentCode, async (newVal) => {
+                    await nextTick();
+                    renderDiagram(newVal);
+                });
+
+                onMounted(() => {
+                    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+                });
+
+                return {
+                    diagramType,
+                    description,
+                    history,
+                    currentIndex,
+                    currentCode,
+                    loading,
+                    error,
+                    diagramContainer,
+                    manualCode,
+                    generateDiagram,
+                    applyManualChanges,
+                    undo,
+                    redo,
+                    newDiagram,
+                    saveDiagramMMD,
+                    saveDiagramSVG
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
